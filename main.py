@@ -16,10 +16,7 @@ def get_args(arg_list):
 
 def main(arg_list):
     args = get_args(arg_list)
-    l,c = parser.get_level(args.dir, (args.start, args.end))
-    i = np.array([-11,18,175]) - c
-    print(i)
-    print(l[tuple(i)])
+    l,c = parser.parse(args.dir, (args.start, args.end))
 
 if __name__ == "__main__":
     main(sys.argv[1:])

@@ -3,4 +3,5 @@ __pycache__/
 *.swp
 output
 logs
+world_temp
 .ipynb_checkpoints

@@ -1,0 +1,13 @@
+sign: (18, 10, 170)
+facing: east
+tower_base
+use:standard
+
+sign: (19, 10, 160)
+facing: east
+tower_mid
+use:standard
+
+sign: (18, 4, 182)
+facing: east
+standard
