@@ -5,3 +5,4 @@ output
 logs
 world_temp
 .ipynb_checkpoints
+*.png

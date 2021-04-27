@@ -1,0 +1,45 @@
+
+BlockFunction : { (Block, {Block}) }
+Semantics:
+f(b) = { a[0] | a \in f s.t. b \in a[1] }
+
+Unknown is a BlockFunction which behaves like
+{ \forall x. (x, {x}) }
+
+Replacement semantics
+Can replace b1 = {Block} with b2 = {Block} ->
+{ (a, b2) \forall a \in b1 }
+Can replace b1 = {Block} with nothing ->
+{ (a, {a, Air}) \forall a \in b1 }
+
+Can replace b1 = BlockFunction with b2 = {Block} ->
+{ (a[0], b2) \forall a \in b1 }
+Can replace b1 = {Block} with b2 = BlockFunction ->
+{ (b, a[0]) \forall b \in b1, \forall a \in b2 }
+Can replace b1 = BlockFunction with b2 = BlockFunction ->
+{ (a1[0], a2[0]) \forall a1 \in b1, \forall a2 \in b2 }
+
+Finally can replace b1 = {BlockFunction} with b2 = {Block} (or {BlockFunction}) ->
+U_(a1 \in b1) Replace a1 b2
+
+Now we have:
+World : Block Array
+Pattern : BlockFunction Array
+PatternExpr : Just Pattern
+	| Stack P1 P2 V
+	| Decorate P1 P2
+	| Star P1 P2 P3 V
+(This is a little bit of a lie -> actually we use an Abstract Syntax Graph where patterns are collected together in geometric arrangements)
+
+When placing an abstract syntax graph, we first find placements for one of the pieces (BFS? What order? User defined ordering function?)
+(Transformations are done on a whole graph level)
+We get
+Placement : Block Array * Position
+
+For a Stack P1 P2 V operation, we first place P1, then use the interfaces of P1 and P2 to find a position + orientation where P2 is compatible with the PLACEMENT that was found for P1 (using V to guide where P2 must appear / which interface of P2 is compared with which interface of the P1 placement).
+Then, for each position and orientation, we find a placement of P2 there. If no placements are found (P2 is not compatible with the world there), we move on to the next possible position.
+
+If no placements at all are found for P2, we move on to the next possible placement of P1 -> or if none are left, we abort saying "no possible placements"
+Otherwise, we return the placement discovered for Stack P1 P2 V.
+
+python3.9 main.py ../worlds/language_test/ --start 32 24 212 --end -42 4 109
