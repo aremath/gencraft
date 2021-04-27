@@ -39,31 +39,30 @@ def parse(level_folder, coord_box):
     all_locs = get_def_locations(level)
     print("Locs: {}".format(all_locs))
     _ = all_preparse(all_locs, level, signs)
-    return blocks, coord_offset
+    return level, coord_offset
 
 def all_preparse(all_locs, level, signs):
     # Key: name, value: {name} is a dependency DAG of patterns
     #TODO: how to verify acyclic?
-    dependencies = {}
+    all_dependencies = {}
     # Key: name, value: preparse components
     # Everything that is required to actually build the required structure
     context_preparse = {}
     pattern_preparse = {}
     funcall_preparse = {}
     for loc_type, loc in all_locs:
-        print(loc_type)
         if loc_type == "Context":
             name, define_text, assignments, dependencies = preparse_context(level, loc, signs)
             print("Name: {}".format(name))
             print("Location: {}".format(loc))
             print("Dependencies: {}".format(dependencies))
-            dependencies[name] = dependencies
+            all_dependencies[name] = dependencies
             context_preparse[name] = (name, define_text, assignments)
         elif loc_type == "Pattern":
             preparse_pattern(level, loc, signs)
         elif loc_type == "Funcall":
             pass
-    return dependencies, context_preparse, pattern_preparse, funcall_preparse
+    return all_dependencies, context_preparse, pattern_preparse, funcall_preparse
 
 nbt_texts = ["Text1", "Text2", "Text3", "Text4"]
 
@@ -189,7 +188,7 @@ def component_size(component, direction):
     Get the overall maximal distance within the given component in the given direction
     """
     # Use dot product to get the correct directional size
-    assert len(cs) > 0, "Empty component has no size"
+    assert len(component) > 0, "Empty component has no size"
     cs = [np.array(c) @ np.array(direction) for c in component]
     return max(cs) - min(cs)
 
@@ -270,15 +269,10 @@ def get_dependencies(texts, self_name):
     return dependencies
 
 def look_for_one_connector(level, component, block, directions):
-    print("Look")
-    print(component)
-    print(block)
     assignment_d = None
     for d in h_adjacents:
         news = set([tuple(np.array(a) + np.array(d)) for a in component]) - component
-        print(news)
         news = set([n for n in news if level[n] == block])
-        print(news)
         if len(news) != 0:
             if assignment_d is not None:
                 return None, "Context: Multiple assignment surfaces: {} @ {}"
@@ -328,7 +322,7 @@ def preparse_context(level, loc, signs):
         assert name not in pre_defines, "Context: Name is already defined: {} @ {}".format(name, loc)
     else:
         name = "anonymous_context_{}".format(loc)
-    print("Preparse - Name {}".format(name))
+    print("Preparse - Name: {}".format(name))
     # Dependencies from the define component
     dependencies = get_dependencies(define_text, name)
     # Determine assignment direction + seed for "assignment surface"
@@ -338,21 +332,25 @@ def preparse_context(level, loc, signs):
     assignment_d, assignment_seed = r
     # Look for the assignment surface
     # Assignment plane is perpendicular to the assignment direction
-    assignment_plane_d = tuple(-rot90z @ np.array(assignment_d))
+    assignment_plane_d = tuple(-rot90y @ np.array(assignment_d))
+    print("Preparse - Assignment D: {}".format(assignment_d))
+    print("Preparse - Assignment Plane D: {}".format(assignment_plane_d))
     assignment_ps = set([assignment_plane_d, tuple(-np.array(assignment_plane_d))])
     assignment_plane_ds = assignment_ps | v_adjacents
     assignment_plane = component(assignment_seed, level, directions=assignment_plane_ds)
     # Look for the replacement surface
-    r, error = look_for_one_connector(level, assignment_plane, block, assignment_d)
+    r, error = look_for_one_connector(level, assignment_plane | define_component, block, assignment_d)
     if error != "" and error != "Context: No assignment surface: {} @ {}":
         assert False, error.format(name, loc)
     # If there is a replacement surface
     if r is not None:
+        print("Preparse - Replacement: {}".format(name))
         r_d, r_seed = r
         replacement_bar = component(r_seed, level, directions=set([assignment_d]))
-        replacement_distance = component_size(component, r_d)
+        replacement_distance = component_size(replacement_bar, r_d)
         # Replacement plane is parallel to assignment plane
-        r, error = look_for_one_connector(level, replacement_bar, directions=assignment_ps)
+        all_but_replacement = replacement_bar | assignment_plane | define_component
+        r, error = look_for_one_connector(level, all_but_replacement, block, directions=assignment_ps)
         assert r is not None, error.format(name, loc)
         replacement_d, replacement_seed = r
         replacement_plane = component(replacement_seed, level, directions=assignment_plane_ds)
