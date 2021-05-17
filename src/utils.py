@@ -18,14 +18,9 @@ define_block = Block.from_string_blockstate("universal_minecraft:bedrock[infinib
 context_block = Block.from_string_blockstate("universal_minecraft:wool[color=blue]")
 pattern_block = Block.from_string_blockstate("universal_minecraft:wool[color=red]")
 function_block = Block.from_string_blockstate("universal_minecraft:wool[color=lime]")
+attach_block = Block.from_string_blockstate("universal_minecraft:wool[color=purple]")
 torch_up = Block.from_string_blockstate("universal_minecraft:torch[facing=up]")
 air = Block.from_string_blockstate("universal_minecraft:air")
-
-# What blocks count as valid signs
-sign_blocks = set([
-    Block.from_string_blockstate("universal_minecraft:oak_wall_sign"),
-    Block.from_string_blockstate("universal_minecraft:oak_sign")
-    ])
 
 # Rotation matrix around z-axis (right hand rule)
 # (1,0,0) -> (0,1,0)
@@ -91,8 +86,8 @@ v_adjacents = set([
 facing_to_dir = bidict({
     "up": (0,1,0),
     "down": (0,-1,0),
-    "east": (-1,0,0),
-    "west": (1,0,0),
+    "east": (1,0,0),
+    "west": (-1,0,0),
     "north": (0,0,-1),
     "south": (0,0,1)
         })
@@ -249,6 +244,20 @@ def inbounds(pos, level):
     else:
         return False
 
+def neighbors(component, directions=adjacents):
+    n = [tuple(np.array(c) + np.array(d)) for c in component for d in directions]
+    # Only elements not in component
+    n = set(n) - component
+    return n
+
+def extent(component):
+    xs = [c[0] for c in component]
+    ys = [c[1] for c in component]
+    zs = [c[2] for c in component]
+    mins = (min(xs), min(ys), min(zs))
+    maxs = (max(xs), max(ys), max(zs))
+    return mins, tuple(np.array(maxs) - np.array(mins))
+
 #TODO: Dijkstras for goal searching
 def bfs(seed, level, lambda_ok, directions=adjacents, goal=None):
     assert inbounds(seed, level)
@@ -276,4 +285,40 @@ def bfs(seed, level, lambda_ok, directions=adjacents, goal=None):
                 return offers, finished
             q.append(a_pos)
     return offers, finished
+
+def find_roots(dependencies):
+    all_objects = set(dependencies.keys())
+    on = set([])
+    for o in all_objects:
+        on |= dependencies[o]
+    roots = [o for o in all_objects if o not in on]
+    return roots
+
+def dependency_dfs(root, parse_order, dependencies, visited_all, cycle_visited):
+    if root in visited_all:
+        return
+    assert root not in cycle_visited, "Circular dependency: {}".format(root)
+
+    cycle_visited.add(root)
+    for d in dependencies[root]:
+        if d in dependencies:
+            dependency_dfs(d, parse_order, dependencies, visited_all, cycle_visited)
+
+    visited_all.add(root)
+    parse_order.insert(0, root)
+
+# DFS-based parse order
+def get_parse_order(dependencies):
+    roots = find_roots(dependencies)
+    parse_order = []
+    visited = set()
+    all_nodes = set(dependencies.keys())
+    while visited != all_nodes:
+        root = roots.pop()
+        dependency_dfs(root, parse_order, dependencies, visited, set())
+    parse_order.reverse()
+    return parse_order
+
+        
+        
 

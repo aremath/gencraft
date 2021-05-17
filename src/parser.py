@@ -3,6 +3,8 @@ from bidict import bidict
 from collections import deque
 import itertools
 import re
+from functools import reduce
+import pickle
 
 from amulet.api.block import Block
 from amulet.api.selection import SelectionBox, SelectionGroup
@@ -12,17 +14,33 @@ import amulet_nbt
 
 from src.utils import *
 
-def parse(level_folder, coord_box):
+def load_level_from_world(level_folder, coord_box):
     # World is a amulet data structure
     world = load_level(level_folder)
     coord_start, coord_end = coord_box
-    print("Reference: {}".format(coord_start))
     box = SelectionBox(coord_start, coord_end)
     # Level is a np array of Blocks
-    level = get_level(world, box)
     coord_offset = np.array(box.min)
     print("Offset: {}".format(coord_offset))
+    level = level_from_world(world, box)
     signs = get_signs(world, box, coord_offset)
+    return level, signs
+
+def load_level_from_npy(level_path, signs_path):
+    with open(level_path, "rb") as level_file:
+        level = np.load(level_file, allow_pickle=True)
+    with open(signs_path, "rb") as signs_file:
+        signs = pickle.load(signs_file)
+    return level, signs
+
+def save_level(level, signs, level_path, signs_path):
+    with open(level_path, "wb") as level_file:
+        np.save(level_file, level, allow_pickle=True)
+    with open(signs_path, "wb") as signs_file:
+        pickle.dump(signs, signs_file)
+
+def parse(level, signs):
+    print("Level shape: {}".format(level.shape))
     #b = world.get_block(17, 11, 170, "overworld")
     #print(b)
     #print(pattern_block)
@@ -37,9 +55,20 @@ def parse(level_folder, coord_box):
     #print(transform_block(block, rot90x @ rot90x))
     #print(transform_block(transform_block(block, rot90x), rot90x))
     all_locs = get_def_locations(level)
-    print("Locs: {}".format(all_locs))
-    _ = all_preparse(all_locs, level, signs)
-    return level, coord_offset
+    #print("Locs: {}".format(all_locs))
+    all_dependencies, context_preparse, pattern_preparse = all_preparse(all_locs, level, signs)
+    print(all_dependencies)
+    parse_order = get_parse_order(all_dependencies)
+    print(parse_order)
+    contexts = {}
+    patterns = {}
+    for name in parse_order:
+        #TODO: allow patterns and contexts w/ same name
+        if name in context_preparse:
+            contexts[name] = parse_context(context_preparse[name], contexts, patterns)
+        elif name in pattern_preparse:
+            patterns[name] = parse_pattern(pattern_preparse[name], contexts, patterns)
+    return level
 
 def all_preparse(all_locs, level, signs):
     # Key: name, value: {name} is a dependency DAG of patterns
@@ -49,20 +78,24 @@ def all_preparse(all_locs, level, signs):
     # Everything that is required to actually build the required structure
     context_preparse = {}
     pattern_preparse = {}
-    funcall_preparse = {}
     for loc_type, loc in all_locs:
         if loc_type == "Context":
             name, define_text, assignments, dependencies = preparse_context(level, loc, signs)
-            print("Name: {}".format(name))
+            print("Context Name: {}".format(name))
             print("Location: {}".format(loc))
             print("Dependencies: {}".format(dependencies))
             all_dependencies[name] = dependencies
             context_preparse[name] = (name, define_text, assignments)
         elif loc_type == "Pattern":
-            preparse_pattern(level, loc, signs)
+            name, define_text, predefinition, interior_signs, dependencies = preparse_pattern(level, loc, signs)
+            print("Pattern Name: {}".format(name))
+            print("Location: {}".format(loc))
+            print("Dependencies: {}".format(dependencies))
+            all_dependencies[name] = dependencies
+            pattern_preparse[name] = (name, define_text, predefinition, interior_signs)
         elif loc_type == "Funcall":
             pass
-    return all_dependencies, context_preparse, pattern_preparse, funcall_preparse
+    return all_dependencies, context_preparse, pattern_preparse
 
 nbt_texts = ["Text1", "Text2", "Text3", "Text4"]
 
@@ -105,7 +138,6 @@ def get_signs(level, box, offset):
                 # Sign position should be stored relative to the real array
                 level_pos = tuple(np.array(pos) - offset)
                 level_on = tuple(np.array(on) - offset)
-                print(pos, level_pos)
                 s = Sign(level_pos, level_on, texts)
                 signs.append(s)
     return signs
@@ -124,7 +156,7 @@ def sign_on(pos, facing):
     if facing is None:
         return pos
     else:
-        return tuple(np.array(pos) + np.array(facing_to_dir[facing]))
+        return tuple(np.array(pos) - np.array(facing_to_dir[facing]))
 
 def read_signs_file(f, reference):
     signs = []
@@ -167,12 +199,12 @@ def read_signs_file(f, reference):
         pos = None
     return signs
 
-def get_level(level, box):
+def level_from_world(world, box):
     shape = np.array(box.max) - np.array(box.min)
     level_array = np.ndarray(shape, dtype="object")
     #print(level_array.shape)
     for (x,y,z) in box:
-        block = level.get_block(x,y,z,"overworld")
+        block = world.get_block(x,y,z,"overworld")
         np_index = tuple(np.array([x,y,z]) - box.min)
         level_array[np_index] = block
     return level_array
@@ -259,7 +291,11 @@ identifier = re.compile(r"[^\d\W]\w*", re.UNICODE)
 # List of identifiers which all 
 pre_defines = ["use"]
 
-def get_dependencies(texts, self_name):
+def sign_to_str(s):
+    t = s.text
+    return reduce(lambda x,y: x+y, t)
+
+def get_dependencies(texts, self_name=""):
     dependencies = set([])
     for t in texts:
         idents = re.findall(identifier, t)
@@ -290,51 +326,62 @@ def get_blocks_from(level, signs, pos, direction):
     current_pos = pos
     block = level[current_pos]
     while block != air:
-        if block in sign_blocks:
-            s = [s for s in signs if s.on == current_pos or s.pos == current_pos]
-            assert len(s) == 1, "Bad sign at {}".format(current_pos)
-            sign = s[0]
-            deps |= get_dependencies(sign.texts)
-        blocks.add(block)
+        #TODO: inefficient - instead create a map of positions to signs
+        signs = [s for s in signs if s.on == current_pos or s.pos == current_pos]
+        if len(signs) > 0:
+            assert len(signs) == 1, "Bad sign at {}".format(current_pos)
+            sign = signs[0]
+            sign_deps = get_dependencies(sign.text)
+            #print("Context: Sign in assign!")
+            #print(sign.text)
+            #print(sign_deps)
+            deps |= sign_deps
+            blocks.add(sign_to_str(sign))
+        else:
+            blocks.add(block)
         current_pos = tuple(np.array(current_pos) + np.array(direction))
         block = level[current_pos]
     return blocks, deps
+
+def prepare_preparse(level, loc, signs, directions=adjacents):
+    #print("Preparse - Loc: {}".format(loc))
+    bot = tuple(np.array(loc) + np.array(facing_to_dir["down"]))
+    # Search down from seed to find "define component"
+    define_component = component(bot, level, directions=directions)
+    #print("Preparse - Component: {}".format(define_component))
+    assert len(define_component) > 0, "Context: Missing definition: ? @ {}".format(loc)
+    define_signs = get_signs_on(define_component, signs)
+    #print("Preparse - Signs: {}".format(define_signs))
+    # Combine the sign text in y-coordinate order
+    define_signs.sort(key = lambda s: -s.on[1])
+    define_text = list(itertools.chain.from_iterable([s.text for s in define_signs]))
+    return define_component, define_text
 
 def preparse_context(level, loc, signs):
     """
     Preparse a context to get the salient features. Parsing cannot be done in one pass since the
     context may be using references in other contexts to refer to blocks
     """
-    print("Preparse - Loc: {}".format(loc))
-    bot = tuple(np.array(loc) + np.array(facing_to_dir["down"]))
-    # Search down from seed to find "define component"
-    define_component = component(bot, level, directions=set([(0,-1,0)]))
-    print("Preparse - Component: {}".format(define_component))
-    assert len(define_component) > 0, "Context: Missing definition: ? @ {}".format(loc)
-    define_signs = get_signs_on(define_component, signs)
-    print("Preparse - Signs: {}".format(define_signs))
-    # Combine the sign text in y-coordinate order
-    define_signs.sort(key = lambda s: s.on[1])
-    define_text = list(itertools.chain.from_iterable([s.text for s in define_signs]))
+    define_component, define_text = prepare_preparse(level, loc, signs, directions=set([(0,-1,0)]))
     if len(define_text) > 0:
         name = define_text[0]
         assert re.match(identifier_only, name) is not None, "Context: Bad name: {} @ {}".format(name, loc)
         assert name not in pre_defines, "Context: Name is already defined: {} @ {}".format(name, loc)
     else:
         name = "anonymous_context_{}".format(loc)
-    print("Preparse - Name: {}".format(name))
+    #print("Preparse - Name: {}".format(name))
     # Dependencies from the define component
     dependencies = get_dependencies(define_text, name)
     # Determine assignment direction + seed for "assignment surface"
-    block = level[bot]
+    block = define_block
     r, error = look_for_one_connector(level, define_component, block, h_adjacents)
     assert r is not None, error.format(name, loc)
     assignment_d, assignment_seed = r
     # Look for the assignment surface
     # Assignment plane is perpendicular to the assignment direction
     assignment_plane_d = tuple(-rot90y @ np.array(assignment_d))
-    print("Preparse - Assignment D: {}".format(assignment_d))
-    print("Preparse - Assignment Plane D: {}".format(assignment_plane_d))
+    #print("Preparse - Assignment D: {}".format(assignment_d))
+    #print("Preparse - Assignment Plane D: {}".format(assignment_plane_d))
     assignment_ps = set([assignment_plane_d, tuple(-np.array(assignment_plane_d))])
     assignment_plane_ds = assignment_ps | v_adjacents
     assignment_plane = component(assignment_seed, level, directions=assignment_plane_ds)
@@ -344,10 +391,10 @@ def preparse_context(level, loc, signs):
         assert False, error.format(name, loc)
     # If there is a replacement surface
     if r is not None:
-        print("Preparse - Replacement: {}".format(name))
+        #print("Preparse - Replacement: {}".format(name))
         r_d, r_seed = r
         replacement_bar = component(r_seed, level, directions=set([assignment_d]))
-        replacement_distance = component_size(replacement_bar, r_d)
+        replacement_distance = component_size(replacement_bar, r_d) + 1
         # Replacement plane is parallel to assignment plane
         all_but_replacement = replacement_bar | assignment_plane | define_component
         r, error = look_for_one_connector(level, all_but_replacement, block, directions=assignment_ps)
@@ -358,28 +405,78 @@ def preparse_context(level, loc, signs):
         replacement_plane = None
         replacement_distance = None
     # Preparse the replacement / assignment and get additional dependencies
-    assignments = list(assignment_plane)
+    assignment_locs = list(assignment_plane)
     # Sort the assignments by assignment direction and y-coordinate
-    assignments.sort(key = lambda x: (np.array(x) @ np.array(assignment_plane_d), np.array(x) @ np.array((0,-1,0))))
+    assignment_locs.sort(key = lambda x: (np.array(x) @ np.array(assignment_plane_d), np.array(x) @ np.array((0,-1,0))))
     assignments = {}
-    for a in assignments:
+    # Get the assignments
+    for a in assignment_locs:
         # The block being assigned to
         assign_to = level[tuple(np.array(a) - np.array(assignment_d))]
-        if assign_to == air:
+        if assign_to == air or assign_to == define_block:
             continue
+        #print("Preparse - Assign {}".format(a))
         a_start = tuple(np.array(a) + np.array(assignment_d))
         assign_from, a_deps = get_blocks_from(level, signs, a_start, assignment_d)
-        replacing_a = tuple(np.array(a) + replacement_distance * np.array(assignment_d))
         dependencies |= a_deps
-        assert level[a] == level[replacing_a]
-        replacing_start = tuple(np.array(replacing_a) + np.array(assignment_d))
-        replacing, r_deps = get_blocks_from(level, signs, replacing_start, assignment_d)
-        assert len(r_deps) == 0, "Context: Can only replace pure blocks: {} @ {}".format(name, loc)
+        if replacement_distance is not None:
+            replacing_a = tuple(np.array(a) + replacement_distance * np.array(assignment_d))
+            assert level[a] == level[replacing_a]
+            replacing_start = tuple(np.array(replacing_a) + np.array(assignment_d))
+            replacing, r_deps = get_blocks_from(level, signs, replacing_start, assignment_d)
+            assert len(r_deps) == 0, "Context: Can only replace pure blocks: {} @ {}".format(name, loc)
+        else:
+            replacing = set([])
         assignments[a] = (assign_from, replacing)
+    #print("Preparse - Done with {}".format(name))
     return name, define_text, assignments, dependencies
 
 def preparse_pattern(level, loc, signs):
-    pass
+    define_component, define_text = prepare_preparse(level, loc, signs)
+    assert len(define_text) > 0, "Pattern: Bad name: @ {}".format(loc)
+    # Unlike contexts, Patterns can be named things like f(x)
+    # Find the first match
+    name_text = define_text[0]
+    try:
+        name = re.findall(identifier, name_text)[0]
+    except IndexError:
+        assert False, "Pattern: Bad name: {} @ {}".format(name, loc)
+    assert name not in pre_defines, "Pattern: Name is already defined: {} @ {}".format(name, loc)
+    # Dependencies from the define component
+    dependencies = get_dependencies(define_text, name)
+    # Also get dependencies from attached anonymous contexts
+    #TODO: Want to only get attachments OUTSIDE the definition so that
+    # purple wool can be used inside patterns
+    attach_points = set([n for n in neighbors(define_component) if level[n] == attach_block])
+    for a in attach_points:
+        context_seed = [n for n in neighbors(set([a])) if level[n] == define_block and n not in define_component]
+        assert len(context_seed) == 1, "Pattern: Multiple contexts from attachment: {} @ {}".format(name, loc)
+        context_component = component(context_seed[0], level)
+        context_start = [n for n in neighbors(context_component, [(0,1,0)]) if level[n] == context_block]
+        assert len(context_start) == 1, "Pattern: Invalid anonymous context: {} @ {}".format(name, loc)
+        assert level[tuple(np.array(context_start[0]) + np.array((0,1,0)))] == torch_up, \
+            "Pattern: Invalid anonymous context: {} @ {}".format(name, loc)
+        dependencies.add("anonymous_context_{}".format(context_start[0]))
+    # Get the blocks within the prepattern as well as preinterfaces
+    # The array of blocks within bounds
+    mins, shape = extent(define_component)
+    print(name)
+    print(shape)
+    mins = np.array(mins)
+    predefinition = np.empty(shape, dtype="object")
+    print(predefinition.shape)
+    indices = set()
+    for i, _ in np.ndenumerate(predefinition):
+        level_index = tuple(mins + np.array(i))
+        if level_index not in define_component:
+            put_block = level[level_index]
+        else:
+            put_block = air
+        predefinition[i] = put_block
+        indices.add(i)
+    interior_signs = set([s for s in signs if s.on in indices])
+    # Interfaces: Key - direction, Value - block array
+    return name, define_text, predefinition, interior_signs, dependencies
 
 def prepare_to_parse(level, loc, signs):
     # Get the bedrock that defines the component
