@@ -15,10 +15,12 @@ def blockstate_to_block(s):
     return Block(namespace, base_name, properties)
 
 define_block = Block.from_string_blockstate("universal_minecraft:bedrock[infiniburn=false]")
-context_block = Block.from_string_blockstate("universal_minecraft:wool[color=blue]")
+blockfunction_block = Block.from_string_blockstate("universal_minecraft:wool[color=blue]")
 pattern_block = Block.from_string_blockstate("universal_minecraft:wool[color=red]")
 function_block = Block.from_string_blockstate("universal_minecraft:wool[color=lime]")
-attach_block = Block.from_string_blockstate("universal_minecraft:wool[color=purple]")
+lambda_block = Block.from_string_blockstate("universal_minecraft:wool[color=light_blue]")
+namespace_block = Block.from_string_blockstate("universal_minecraft:wool[color=pink]")
+#attach_block = Block.from_string_blockstate("universal_minecraft:wool[color=purple]")
 torch_up = Block.from_string_blockstate("universal_minecraft:torch[facing=up]")
 air = Block.from_string_blockstate("universal_minecraft:air")
 
@@ -260,10 +262,12 @@ def extent(component):
 
 #TODO: Dijkstras for goal searching
 def bfs(seed, level, lambda_ok, directions=adjacents, goal=None):
-    assert inbounds(seed, level)
+    assert inbounds(seed, level), "{} is not in bounds".format(seed)
     q = deque([np.array(seed)])
     offers = {}
     finished = set([seed])
+    if not lambda_ok(level[seed]):
+        return {}, set([])
     while len(q) > 0:
         pos = q.popleft()
         pos_t = tuple(pos)
@@ -285,6 +289,45 @@ def bfs(seed, level, lambda_ok, directions=adjacents, goal=None):
                 return offers, finished
             q.append(a_pos)
     return offers, finished
+
+def component(seed, level, block=None, directions=adjacents):
+    if block is None:
+        block = level[seed]
+    lambda_ok = lambda x: x == block
+    _,f = bfs(seed, level, lambda_ok, directions)
+    return f
+
+def component_bbox(component):
+    small = []
+    large = []
+    for d in [(1,0,0), (0,1,0), (0,0,1)]:
+        cs = [np.array(c) @ np.array(d) for c in component]
+        small.append(min(cs))
+        large.append(max(cs) + 1)
+    return tuple(small), tuple(large)
+
+def pos_in_bbox(pos, bbox):
+    for x, small, large in zip(pos, bbox[0], bbox[1]):
+        if x < small or x >= large:
+            return False
+    return True
+
+def bbox_intersect(bbox1, bbox2):
+    for l, r in zip(zip(*bbox1), zip(*bbox2)):
+        low1, high1 = l
+        low2, high2 = r
+        if low1 >= high2 or high1 < low2:
+            return False
+    return True
+
+# Containment
+def bbox_in(bbox1, bbox2):
+    for l, r in zip(zip(*bbox1), zip(*bbox2)):
+        low1, high1 = l
+        low2, high2 = r
+        if low1 < low2 or high1 > high2:
+            return False
+    return True
 
 def find_roots(dependencies):
     all_objects = set(dependencies.keys())
@@ -318,7 +361,4 @@ def get_parse_order(dependencies):
         dependency_dfs(root, parse_order, dependencies, visited, set())
     parse_order.reverse()
     return parse_order
-
-        
-        
 

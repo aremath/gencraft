@@ -1,6 +1,6 @@
 import numpy as np
 from bidict import bidict
-from collections import deque, defaultdict
+from collections import deque
 import itertools
 import re
 from functools import reduce
@@ -54,9 +54,20 @@ def parse(level, signs):
     #print(block)
     #print(transform_block(block, rot90x @ rot90x))
     #print(transform_block(transform_block(block, rot90x), rot90x))
-    #all_locs = get_def_locations(level)
+    all_locs = get_def_locations(level)
     #print("Locs: {}".format(all_locs))
-    info = prepare_parse(level, signs)
+    all_dependencies, context_preparse, pattern_preparse = all_preparse(all_locs, level, signs)
+    print(all_dependencies)
+    parse_order = get_parse_order(all_dependencies)
+    print(parse_order)
+    contexts = {}
+    patterns = {}
+    for name in parse_order:
+        #TODO: allow patterns and contexts w/ same name
+        if name in context_preparse:
+            contexts[name] = parse_context(context_preparse[name], contexts, patterns)
+        elif name in pattern_preparse:
+            patterns[name] = parse_pattern(pattern_preparse[name], contexts, patterns)
     return level
 
 def all_preparse(all_locs, level, signs):
@@ -141,10 +152,6 @@ class Sign(object):
     def __repr__(self):
         return str((self.pos, self.on, self.text))
 
-    def __eq__(self,other):
-        # Two signs can't occupy the same location
-        return self.pos == other.pos
-
 def sign_on(pos, facing):
     if facing is None:
         return pos
@@ -202,6 +209,12 @@ def level_from_world(world, box):
         level_array[np_index] = block
     return level_array
 
+def component(seed, level, directions=adjacents):
+    block = level[seed]
+    lambda_ok = lambda x: x == block
+    _,f = bfs(seed, level, lambda_ok, directions)
+    return f
+
 def component_size(component, direction):
     """
     Get the overall maximal distance within the given component in the given direction
@@ -243,206 +256,8 @@ def get_def_locations(level):
             all_locs |= new_locs
     return all_locs
 
-def mk_assignments(level, signs):
-    # Key: assignment pos, Value: {pos} on assigment component
-    assignment_pos = {}
-    # Key: assignment pos, Value: assignment sign
-    assignment_signs = {}
-    # Set of all positions that belong to an assignment
-    assignment_set = set([])
-    assign_locs = [s for s in signs if s.text[0] == ":=" or s.text[0] == "=:"]
-    for sign in assign_locs:
-        loc = sign.on
-        # It's only a valid assignment if there's a torch
-        if level[tuple(np.array(loc) + np.array([0,1,0]))] == torch_up:
-            assignment_signs = {}
-            loc_component = component(loc, level, define_block)
-            assert len(loc_component) > 0
-            assignment_pos[loc] = loc_component
-            assignment_set |= loc_component
-    return assignment_pos, assignment_signs, assignment_set
-
-def mk_namespaces(level, signs, assignment_set):
-    # Key: namespace def position, Value: (min, max) bounding box for namespace
-    namespaces = {}
-    for pos in get_level_block_pos(level, namespace_block):
-        print(pos)
-        l = 0
-        namespace_component = None
-        for a in adjacents:
-            p = tuple(np.array(pos) + np.array(a))
-            bad_signs = [s for s in signs if s.on == p]
-            if len(bad_signs) > 0:
-                continue
-            a_component = component(p, level, define_block)
-            a_component = a_component - assignment_set
-            if len(a_component) > 0:
-                l += 1
-                namespace_component = a_component
-        assert l == 1, "Namespace at {} has multiple components".format(pos)
-        bbox = component_bbox(namespace_component)
-        namespaces[pos] = bbox
-    namespaces["global"] = ((0,0,0), level.shape)
-    return namespaces
-
-def mk_namespace_graph(namespaces):
-    g = {}
-    for n, b in namespaces.items():
-        g[n] = set([])
-        for n2, b2 in namespaces.items():
-            if bbox_in(b, b2):
-                if n != n2:
-                    g[n].add(n2)
-    return g
-
-def namespace_assignments(assignments, namespaces):
-    """ Produce mappings from namespace to [assignments] and 
-        assignment pos to [namespaces] """
-    # Key: Namespace pos, Value: [assignment pos] in that namespace
-    namespace_as = defaultdict(list)
-    # Key: Assignment pos, Value: [namespaces pos] the assignment is in
-    a_namespaces = {}
-    g = mk_namespace_graph(namespaces)
-    # Get an ordering of namespaces based on containment
-    o = get_parse_order(g)
-    for a in assignments.keys():
-        # All namespaces the assignment is in
-        ins = [n for n, b in namespaces.items() if pos_in_bbox(a, b)]
-        ordered_ins = []
-        for o in order:
-            if o in ins:
-                ordered_ins.append(o)
-        assert len(ordered_ins) > 0
-        namespace_as[ordered_ins[-1]].append(a)
-        a_namespaces[a] = ordered_ins
-    return namespace_as, a_namespaces
-
-def prepare_parse(level, signs):
-    assignment_pos, assignment_signs, assignment_set = mk_assignments(level, signs)
-    namespaces = mk_namespaces(level, signs, assignment_set)
-    namespace_as, a_namespaces = namespace_assignments(assignment_pos, namespaces)
-    ParseInfo(level, signs, assignment_pos, assingment_signs, assignment_set, namespaces, namespace_as, a_namespaces)
-
 def get_signs_on(locs, signs):
     return [s for s in signs if s.on in locs]
-
-def get_sign_at(loc, signs):
-    ss = [s for s in signs if s.pos == loc]
-    return ss
-
-def match_ids_with_vals(id_posns, val_posns):
-    matched = []
-    for id_pos in id_posns:
-        # Sort by distance, closest one is the desired one
-        val_posns.sort(key=lambda x: np.linalg.norm(np.array(id_pos) - np.array(x)))
-        matched.append((id_pos, val_posns[0]))
-    return matched
-
-def get_ident(pos, info):
-    ss = get_sign_at(pos, info.signs)
-    if len(ss) == 0:
-        assert info.level[pos] != air
-        return info.level[pos]
-    else:
-        assert len(ss) == 1
-        sign = ss[0]
-        assert re.match(identifier_only, sign.text[0]) is not None, "Bad identifier at {}".format(pos)
-        return sign.text[0]
-
-# Get the preparsed level AST
-def parse_assignment(info, pos, direction):
-    # Direction is unknown, so should be 
-    assert direction is None, "Bad assignment: {}".format(pos)
-    s = info.assignment_signs[pos]
-    assign_component = info.assignment_pos[pos]
-    assign_sign_facing = np.array(s.on) - np.array(s.pos)
-    # Assign direction points from the ident towards the assignment body
-    if s.text[0] == ":=":
-        assign_direction = assign_sign_facing @ rot90y
-    elif s.text[0] == "=:":
-        assign_direction = assign_sign_facing @ (-rot90y)
-    else
-        assert False, "Bad assignment: {}".format(pos)
-    ident_posns = neighbors(assign_component, directions=[tuple(-assign_direction)])
-    # All the assignments created by this component
-    ident_posns = [i for i in ident_posns if level[i] != air]
-    val_posns = neighbors(assign_component, directions=[tuple(assign_direction)])
-    matched_posns = match_ids_with_vals(ident_posns, val_posns)
-    # Identifier -> pos
-    pre_mapping = [(get_ident(k, info), v) for k,v in matched_posns]
-    # Identifier -> parsed thing
-    mapping = {}
-    for ident, v_pos in pre_mapping:
-        val = parse_any(info, v_pos, assignment_direction)
-        mapping[ident] = val
-    # Do the extra work to get the priority and the require_str
-    assign_signs = get_signs_on(assignment_component, info.signs)
-    # Remove all the signs which are keys
-    for k, v in matched_posns:
-        ss = get_sign_at(k)
-        if len(ss) == 1:
-            assign_signs.remove(ss[0])
-    # Sort them by decreasing y-coordinate
-    assign_signs.sort(key=lambda x: -x.on[1])
-    assert assign_signs[0] == s, "Bad assignment: {}".format(pos)
-    priority = int(s.text[1])
-    # List of strings
-    rest_text = s.text[2:] + reduce(lambda x,y: x + y, [s.text for s in assign_signs[1:]])
-    # String
-    require_str = reduce(lambda x,y: x + y, rest_text)
-    assignments = [PreAssignment(ident, priority, require_str, val) for ident, val in mapping.items()]
-    return assignments
-
-def parse_namespace(info, pos, direction):
-    assignments = []
-    for a in info.namespaces_as[pos]:
-        assignments.extend(parse_assignment(info, a, None))
-    return PreNamespace(assignments)
-
-def parse_blockfunction(info, pos, direction):
-    output_start = tuple(np.array(pos) + np.array(direction))
-    ok = lambda x: (x!=air and x!=define_block)
-    _, component1 = bfs(output_start, info.level, ok, directions=[direction])
-    boundary = neighbors(component1, directions=[direction])
-    assert len(boundary) == 1, "Bad blockfunction: {}".format(pos)
-    boundary = boundary[0]
-    component2 = set()
-    if level[boundary] == define_block:
-        input_start = tuple(np.array(boundary) + np.array(direction))
-        _, component2 = bfs(input_start, info.level, ok, directions=[direction])
-    blocks_out = set(map(lambda x: level[x], component1))
-    blocks_in = set(map(lambda x: level[x], component2))
-    return PreBlockFunction(blocks_out, blocks_in)
-
-def parse_pattern(info, pos, direction):
-    pass
-
-def parse_lambda(info, pos, direction):
-    inputs_start = tuple(np.array(pos) + np.array(direction))
-    inputs_component = component(inputs_start, info.level, directions=[direction])
-    ident_posns = neighbors(assign_component)
-    ident_posns = [i for i in ident_posns if level[i] != air]
-    # Get them in order
-    ident_posns.sort(key=lambda x: np.array(x) @ direction)
-    idents = list(map(lambda x: get_ident(x, info), ident_posns))
-    expr_pos = neighbors(inputs_component, directions=[direction])
-    assert len(expr_pos) == 1, "Bad lambda: {}".format(pos)
-    expr_pos = expr_pos[0]
-    val = parse_any(info, expr_pos, direction)
-    return PreLambda(idents, expr)
-
-parsers = {
-    blockfunction_block: parse_blockfunction,
-    pattern_block: parse_pattern,
-    namespace_block: parse_namespace,
-    lambda_block: parse_lambda
-}
-
-def parse_any(info, pos, direction):
-    block_type = level[pos]
-    assert block_type in parsers, "No parser for the block type at: {}".format(pos)
-    parser = parsers[block_type]
-    val = parser(info, pos, direction)
 
 class Context(object):
 
@@ -696,8 +511,8 @@ def parse_context(preparse, contexts, patterns, fvars=None):
         d[k] = eval(v, locals=(patterns | locals()))
         if isinstance(k, str):
             pass
-        #elif ...
-        #    pass
+        elif ...
+            pass
 
 def parse_pattern(preparse, contexts, patterns):
     name, define_text, predefinition, interior_signs = preparse

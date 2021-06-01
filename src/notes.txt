@@ -45,3 +45,7 @@ Otherwise, we return the placement discovered for Stack P1 P2 V.
 python3.9 main.py world ../worlds/language_test/ --start 32 24 212 --end -42 4 109
 python3.9 main.py npy ../worlds/language_test.npy ../worlds/language_test.signs
 python3.9 main.py convert ../worlds/language_test/ ../worlds/language_test.npy ../worlds/language_test.signs --start 32 24 212 --end -42 4 109
+
+language_new
+40 19 202
+-40 4 107
