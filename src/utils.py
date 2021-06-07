@@ -17,12 +17,16 @@ def blockstate_to_block(s):
 define_block = Block.from_string_blockstate("universal_minecraft:bedrock[infiniburn=false]")
 blockfunction_block = Block.from_string_blockstate("universal_minecraft:wool[color=blue]")
 pattern_block = Block.from_string_blockstate("universal_minecraft:wool[color=red]")
-function_block = Block.from_string_blockstate("universal_minecraft:wool[color=lime]")
 lambda_block = Block.from_string_blockstate("universal_minecraft:wool[color=light_blue]")
 namespace_block = Block.from_string_blockstate("universal_minecraft:wool[color=pink]")
-#attach_block = Block.from_string_blockstate("universal_minecraft:wool[color=purple]")
+string_block = Block.from_string_blockstate("universal_minecraft:wool[color=lime]")
+funcall_block = Block.from_string_blockstate("universal_minecraft:wool[color=cyan]")
+union_block = Block.from_string_blockstate("universal_minecraft:wool[color=purple]")
 torch_up = Block.from_string_blockstate("universal_minecraft:torch[facing=up]")
 air = Block.from_string_blockstate("universal_minecraft:air")
+
+def is_sign(b):
+    return b.base_name == "oak_wall_sign"
 
 # Rotation matrix around z-axis (right hand rule)
 # (1,0,0) -> (0,1,0)
@@ -296,6 +300,14 @@ def component(seed, level, block=None, directions=adjacents):
     lambda_ok = lambda x: x == block
     _,f = bfs(seed, level, lambda_ok, directions)
     return f
+
+def parse_ok(block):
+     return (block != air and block != define_block and not is_sign(block))
+
+def parse_component(seed, level, directions=adjacents):
+    ok = parse_ok
+    _, component = bfs(output_start, level, ok, directions=directions)
+    return component
 
 def component_bbox(component):
     small = []

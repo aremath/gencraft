@@ -13,6 +13,7 @@ from amulet import load_level
 import amulet_nbt
 
 from src.utils import *
+from src.types import *
 
 def load_level_from_world(level_folder, coord_box):
     # World is a amulet data structure
@@ -57,6 +58,9 @@ def parse(level, signs):
     #all_locs = get_def_locations(level)
     #print("Locs: {}".format(all_locs))
     info = prepare_parse(level, signs)
+    print(info.assignment_signs)
+    global_expr = parse_namespace(info, "global", None)
+    #global_val = global_expr.compile({})
     return level
 
 def all_preparse(all_locs, level, signs):
@@ -141,9 +145,16 @@ class Sign(object):
     def __repr__(self):
         return str((self.pos, self.on, self.text))
 
-    def __eq__(self,other):
+    def __eq__(self, other):
         # Two signs can't occupy the same location
         return self.pos == other.pos
+    
+    @property
+    def full_text(self):
+        """
+        All the sign text as one string
+        """
+        return reduce(lambda x,y: x + y, [t for t in self.text])
 
 def sign_on(pos, facing):
     if facing is None:
@@ -250,12 +261,12 @@ def mk_assignments(level, signs):
     assignment_signs = {}
     # Set of all positions that belong to an assignment
     assignment_set = set([])
-    assign_locs = [s for s in signs if s.text[0] == ":=" or s.text[0] == "=:"]
-    for sign in assign_locs:
+    assign_signs = [s for s in signs if s.text[0] == ":=" or s.text[0] == "=:"]
+    for sign in assign_signs:
         loc = sign.on
         # It's only a valid assignment if there's a torch
         if level[tuple(np.array(loc) + np.array([0,1,0]))] == torch_up:
-            assignment_signs = {}
+            assignment_signs[loc] = sign
             loc_component = component(loc, level, define_block)
             assert len(loc_component) > 0
             assignment_pos[loc] = loc_component
@@ -266,7 +277,6 @@ def mk_namespaces(level, signs, assignment_set):
     # Key: namespace def position, Value: (min, max) bounding box for namespace
     namespaces = {}
     for pos in get_level_block_pos(level, namespace_block):
-        print(pos)
         l = 0
         namespace_component = None
         for a in adjacents:
@@ -304,7 +314,7 @@ def namespace_assignments(assignments, namespaces):
     a_namespaces = {}
     g = mk_namespace_graph(namespaces)
     # Get an ordering of namespaces based on containment
-    o = get_parse_order(g)
+    order = get_parse_order(g)
     for a in assignments.keys():
         # All namespaces the assignment is in
         ins = [n for n, b in namespaces.items() if pos_in_bbox(a, b)]
@@ -321,7 +331,7 @@ def prepare_parse(level, signs):
     assignment_pos, assignment_signs, assignment_set = mk_assignments(level, signs)
     namespaces = mk_namespaces(level, signs, assignment_set)
     namespace_as, a_namespaces = namespace_assignments(assignment_pos, namespaces)
-    ParseInfo(level, signs, assignment_pos, assingment_signs, assignment_set, namespaces, namespace_as, a_namespaces)
+    return ParseInfo(level, signs, assignment_pos, assignment_signs, assignment_set, namespaces, namespace_as, a_namespaces)
 
 def get_signs_on(locs, signs):
     return [s for s in signs if s.on in locs]
@@ -335,6 +345,7 @@ def match_ids_with_vals(id_posns, val_posns):
     for id_pos in id_posns:
         # Sort by distance, closest one is the desired one
         val_posns.sort(key=lambda x: np.linalg.norm(np.array(id_pos) - np.array(x)))
+        print(val_posns)
         matched.append((id_pos, val_posns[0]))
     return matched
 
@@ -351,6 +362,7 @@ def get_ident(pos, info):
 
 # Get the preparsed level AST
 def parse_assignment(info, pos, direction):
+    print("Parsing Assignment at {}".format(pos))
     # Direction is unknown, so should be 
     assert direction is None, "Bad assignment: {}".format(pos)
     s = info.assignment_signs[pos]
@@ -361,85 +373,249 @@ def parse_assignment(info, pos, direction):
         assign_direction = assign_sign_facing @ rot90y
     elif s.text[0] == "=:":
         assign_direction = assign_sign_facing @ (-rot90y)
-    else
+    else:
         assert False, "Bad assignment: {}".format(pos)
     ident_posns = neighbors(assign_component, directions=[tuple(-assign_direction)])
     # All the assignments created by this component
-    ident_posns = [i for i in ident_posns if level[i] != air]
+    ident_posns = list(filter(lambda x: info.level[x] != air, ident_posns))
     val_posns = neighbors(assign_component, directions=[tuple(assign_direction)])
+    val_posns = list(filter(lambda x: info.level[x] != air, val_posns))
+    #print("Ident:", ident_posns)
+    #print("Val:", val_posns)
     matched_posns = match_ids_with_vals(ident_posns, val_posns)
+    assert len(matched_posns) > 0, "Bad assignment: {}".format(pos)
+    print(matched_posns)
     # Identifier -> pos
     pre_mapping = [(get_ident(k, info), v) for k,v in matched_posns]
     # Identifier -> parsed thing
     mapping = {}
     for ident, v_pos in pre_mapping:
-        val = parse_any(info, v_pos, assignment_direction)
+        val = parse_any(info, v_pos, assign_direction)
         mapping[ident] = val
     # Do the extra work to get the priority and the require_str
-    assign_signs = get_signs_on(assignment_component, info.signs)
+    assign_signs = get_signs_on(assign_component, info.signs)
+    print(assign_signs)
     # Remove all the signs which are keys
     for k, v in matched_posns:
-        ss = get_sign_at(k)
+        ss = get_sign_at(k, info.signs)
         if len(ss) == 1:
+            print(k)
             assign_signs.remove(ss[0])
+    print(assign_signs)
     # Sort them by decreasing y-coordinate
     assign_signs.sort(key=lambda x: -x.on[1])
     assert assign_signs[0] == s, "Bad assignment: {}".format(pos)
     priority = int(s.text[1])
     # List of strings
-    rest_text = s.text[2:] + reduce(lambda x,y: x + y, [s.text for s in assign_signs[1:]])
+    rest_text = s.text[2:] + reduce(lambda x,y: x + y, [s.text for s in assign_signs[1:]], [])
     # String
-    require_str = reduce(lambda x,y: x + y, rest_text)
-    assignments = [PreAssignment(ident, priority, require_str, val) for ident, val in mapping.items()]
+    require_str = reduce(lambda x,y: x + y, rest_text, "")
+    assignments = [Assignment(ident, priority, require_str, val) for ident, val in mapping.items()]
     return assignments
 
+def parse_expr_graph(info, pos, directions=adjacents, finished=None):
+    offers = {}
+    # pos -> [(direction, pos)]
+    edges = defaultdict(list)
+    # pos -> expr
+    nodes = {}
+    q = deque([pos])
+    if finished is None:
+        finished = set()
+    finished.add(pos)
+    while len(q) > 0:
+        pos = q.popleft()
+        parser = get_parser(info.level[pos])
+        p_d = get_parse_direction(pos, info.level, finished)
+        p_expr, p_finished = parser(info, pos, p_d)
+        # Add to finished the nodes that were parsed by the subparser
+        finished |= p_finished
+        nodes[pos] = p_expr
+        for d in directions:
+            d_pos = tuple(np.array(pos) + np.array(d))
+            # Failure conditions
+            if d_pos in finished:
+                # If it's already been parsed, add edges
+                if d_pos in nodes:
+                    edges[pos].append((d, d_pos))
+                    edges[d_pos].append((tuple(-np.array(d)), pos))
+                continue
+            if not parse_ok(info.level[d_pos]):
+                continue
+            if not inbounds(d_pos, info.level):
+                continue
+            # Otherwise, add it
+            finished.add(d_pos)
+            offers[d_pos] = pos
+            q.append(d_pos)
+    return offers, finished, Graph(nodes, edges)
+
+def expr_graph_to_list(graph, root):
+    out_pos = []
+    finished = {root}
+    assert root in graph.nodes
+    q = deque([root])
+    while len(q) > 0:
+        pos = q.popleft()
+        out_pos.append(pos)
+        for n in graph.edges[pos]:
+            if n not in finished:
+                q.append(n)
+                finished.add(n)
+    return list(map(lambda x: graph.nodes[x], out_pos))
+
 def parse_namespace(info, pos, direction):
+    print("Parsing Namespace at {}".format(pos))
     assignments = []
     for a in info.namespaces_as[pos]:
         assignments.extend(parse_assignment(info, a, None))
-    return PreNamespace(assignments)
+    return Namespace(assignments)
 
 def parse_blockfunction(info, pos, direction):
+    print("Parsing BlockFunction at {}".format(pos))
     output_start = tuple(np.array(pos) + np.array(direction))
-    ok = lambda x: (x!=air and x!=define_block)
-    _, component1 = bfs(output_start, info.level, ok, directions=[direction])
+    finished = set([output_start])
+    _, component1, g1 = parse_expr_graph(info, output_start, [direction], finished)
     boundary = neighbors(component1, directions=[direction])
     assert len(boundary) == 1, "Bad blockfunction: {}".format(pos)
-    boundary = boundary[0]
-    component2 = set()
-    if level[boundary] == define_block:
+    boundary = next(iter(boundary))
+    exprs_in = []
+    if info.level[boundary] == define_block:
         input_start = tuple(np.array(boundary) + np.array(direction))
-        _, component2 = bfs(input_start, info.level, ok, directions=[direction])
-    blocks_out = set(map(lambda x: level[x], component1))
-    blocks_in = set(map(lambda x: level[x], component2))
-    return PreBlockFunction(blocks_out, blocks_in)
+        finished.add(input_start)
+        _, component2, g2 = parse_expr_graph(info, input_start, [direction], finished)
+        exprs_in = expr_graph_to_list(g2, input_start)
+    else:
+        component2 = set()
+    exprs_out = expr_graph_to_list(g1, output_start)
+    finished = component1 | component2 | set([pos, boundary])
+    return BlockFunctionDef(exprs_out, exprs_in), finished
+
 
 def parse_pattern(info, pos, direction):
-    pass
+    print("Parsing Pattern at {}".format(pos))
+    start = tuple(np.array(pos) + np.array(direction))
+    o, f, g = parse_expr_graph(info, start, finished=set([pos]))
+    return ExprGraph(g), f
 
 def parse_lambda(info, pos, direction):
+    print("Parsing Lambda at {}".format(pos))
     inputs_start = tuple(np.array(pos) + np.array(direction))
     inputs_component = component(inputs_start, info.level, directions=[direction])
-    ident_posns = neighbors(assign_component)
-    ident_posns = [i for i in ident_posns if level[i] != air]
+    ident_posns = neighbors(inputs_component)
+    ident_posns = [i for i in ident_posns if info.level[i] != air]
     # Get them in order
     ident_posns.sort(key=lambda x: np.array(x) @ direction)
     idents = list(map(lambda x: get_ident(x, info), ident_posns))
     expr_pos = neighbors(inputs_component, directions=[direction])
     assert len(expr_pos) == 1, "Bad lambda: {}".format(pos)
-    expr_pos = expr_pos[0]
-    val = parse_any(info, expr_pos, direction)
-    return PreLambda(idents, expr)
+    expr_pos = next(iter(expr_pos))
+    expr = parse_any(info, expr_pos, direction)
+    return Lambda(idents, expr)
+
+def parse_string(info, pos, direction):
+    print("Parsing String at {}".format(pos))
+    signs_on = [s for s in info.signs if s.on == pos]
+    assert len(signs_on) == 1
+    sign = signs_on[0]
+    t = sign.full_text
+    return String(t), set([pos, sign.pos])
+
+def parse_funcall(info, pos, direction):
+    print("Parsing FunCall at {}".format(pos))
+    fn_start = tuple(np.array(pos) + np.array(direction))
+    finished = set([fn_start])
+    _, component1, g1 = parse_expr_graph(info, fn_start, [direction], finished)
+    fn_expr = expr_graph_to_list(g1, fn_start)
+    assert len(fn_expr) == 1
+    boundary = neighbors(component1, directions=[direction])
+    assert len(boundary) == 1, "Bad blockfunction: {}".format(pos)
+    boundary = boundary[0]
+    args = []
+    if info.level[boundary] == define_block:
+        args_start = tuple(np.array(boundary) + np.array(direction))
+        finished.add(args_start)
+        _, component2, g2 = parse_expr_graph(info, args_start, [direction], finished)
+        args = expr_graph_to_list(g2, args_start)
+    else:
+        component2 = set()
+    finished = component1 | component2 | set([pos, boundary])
+    return FunCall(fn, args), finished
+
+def parse_union(info, pos, direction):
+    print("Parsing Union at {}".format(pos))
+    start = tuple(np.array(pos) + np.array(direction))
+    finished = set([start])
+    _, component, g = parse_expr_graph(info, start, [direction], finished)
+    exprs = expr_graph_to_list(g, start)
+    return UnionDef(exprs), component | set([pos])
+
+def parse_block(info, pos, direction):
+    print("Parsing Block at {}".format(pos))
+    return BlockExpr(info.level[pos]), set([pos])
 
 parsers = {
     blockfunction_block: parse_blockfunction,
     pattern_block: parse_pattern,
     namespace_block: parse_namespace,
-    lambda_block: parse_lambda
+    lambda_block: parse_lambda,
+    string_block: parse_string,
+    funcall_block: parse_funcall,
+    union_block: parse_union
 }
 
+# Binding order. Higher binds more loosely
+priorities = {
+    blockfunction_block: 2,
+    pattern_block: 2,
+    namespace_block: 2,
+    lambda_block: 2,
+    string_block: 1,
+    funcall_block: 2,
+    union_block: 2
+}
+
+def get_parser(block):
+    if block in parsers:
+        return parsers[block]
+    else:
+        return parse_block
+
+#TODO: precedence
+def get_parse_direction(pos, level, finished):
+    ds = []
+    priorities = []
+    for n in neighbors(set([pos])):
+        # Skip neighbors that have already been parsed
+        if n in finished:
+            continue
+        n_block = level[n]
+        if n_block in priorities:
+            block_priority = priorities[n_block]
+        # Parser is a Block, => highest binding order
+        else:
+            block_priority = 0
+        ds.append(tuple(np.array(n) - np.array(pos)))
+        priorities.append(block_priority)
+    # Sort them by priority
+    dps = list(zip(ds, priorities))
+    dps.sort(key=lambda x: x[1])
+    # If there are no valid neighbors, return None (which may be ok for some parsers)
+    if len(dps) == 0:
+        return None
+    else:
+        initial_d, initial_p = dps[0]
+        if len(dps) == 1:
+            return initial_d
+        # Also should return None if there are multiple neighbors at the same priority
+        # as the highest priority neighbor. Parsing is ambiguous
+        elif dps[1][1] == initial_p:
+            return None
+        else:
+            return initial_d
+
 def parse_any(info, pos, direction):
-    block_type = level[pos]
+    block_type = info.level[pos]
     assert block_type in parsers, "No parser for the block type at: {}".format(pos)
     parser = parsers[block_type]
     val = parser(info, pos, direction)
@@ -529,178 +705,8 @@ def get_blocks_from(level, signs, pos, direction):
         block = level[current_pos]
     return blocks, deps
 
-def prepare_preparse(level, loc, signs, directions=adjacents):
-    #print("Preparse - Loc: {}".format(loc))
-    bot = tuple(np.array(loc) + np.array(facing_to_dir["down"]))
-    # Search down from seed to find "define component"
-    define_component = component(bot, level, directions=directions)
-    #print("Preparse - Component: {}".format(define_component))
-    assert len(define_component) > 0, "Context: Missing definition: ? @ {}".format(loc)
-    define_signs = get_signs_on(define_component, signs)
-    #print("Preparse - Signs: {}".format(define_signs))
-    # Combine the sign text in y-coordinate order
-    define_signs.sort(key = lambda s: -s.on[1])
-    define_text = list(itertools.chain.from_iterable([s.text for s in define_signs]))
-    return define_component, define_text
-
-def preparse_context(level, loc, signs):
-    """
-    Preparse a context to get the salient features. Parsing cannot be done in one pass since the
-    context may be using references in other contexts to refer to blocks
-    """
-    define_component, define_text = prepare_preparse(level, loc, signs, directions=set([(0,-1,0)]))
-    if len(define_text) > 0:
-        name = define_text[0]
-        assert re.match(identifier_only, name) is not None, "Context: Bad name: {} @ {}".format(name, loc)
-        assert name not in pre_defines, "Context: Name is already defined: {} @ {}".format(name, loc)
-    else:
-        name = "anonymous_context_{}".format(loc)
-    #print("Preparse - Name: {}".format(name))
-    # Dependencies from the define component
-    dependencies = get_dependencies(define_text, name)
-    # Determine assignment direction + seed for "assignment surface"
-    block = define_block
-    r, error = look_for_one_connector(level, define_component, block, h_adjacents)
-    assert r is not None, error.format(name, loc)
-    assignment_d, assignment_seed = r
-    # Look for the assignment surface
-    # Assignment plane is perpendicular to the assignment direction
-    assignment_plane_d = tuple(-rot90y @ np.array(assignment_d))
-    #print("Preparse - Assignment D: {}".format(assignment_d))
-    #print("Preparse - Assignment Plane D: {}".format(assignment_plane_d))
-    assignment_ps = set([assignment_plane_d, tuple(-np.array(assignment_plane_d))])
-    assignment_plane_ds = assignment_ps | v_adjacents
-    assignment_plane = component(assignment_seed, level, directions=assignment_plane_ds)
-    # Look for the replacement surface
-    r, error = look_for_one_connector(level, assignment_plane | define_component, block, assignment_d)
-    if error != "" and error != "Context: No assignment surface: {} @ {}":
-        assert False, error.format(name, loc)
-    # If there is a replacement surface
-    if r is not None:
-        #print("Preparse - Replacement: {}".format(name))
-        r_d, r_seed = r
-        replacement_bar = component(r_seed, level, directions=set([assignment_d]))
-        replacement_distance = component_size(replacement_bar, r_d) + 1
-        # Replacement plane is parallel to assignment plane
-        all_but_replacement = replacement_bar | assignment_plane | define_component
-        r, error = look_for_one_connector(level, all_but_replacement, block, directions=assignment_ps)
-        assert r is not None, error.format(name, loc)
-        replacement_d, replacement_seed = r
-        replacement_plane = component(replacement_seed, level, directions=assignment_plane_ds)
-    else:
-        replacement_plane = None
-        replacement_distance = None
-    # Preparse the replacement / assignment and get additional dependencies
-    assignment_locs = list(assignment_plane)
-    # Sort the assignments by assignment direction and y-coordinate
-    assignment_locs.sort(key = lambda x: (np.array(x) @ np.array(assignment_plane_d), np.array(x) @ np.array((0,-1,0))))
-    assignments = {}
-    # Get the assignments
-    for a in assignment_locs:
-        # The block being assigned to
-        assign_to = level[tuple(np.array(a) - np.array(assignment_d))]
-        if assign_to == air or assign_to == define_block:
-            continue
-        #print("Preparse - Assign {}".format(a))
-        a_start = tuple(np.array(a) + np.array(assignment_d))
-        assign_from, a_deps = get_blocks_from(level, signs, a_start, assignment_d)
-        dependencies |= a_deps
-        if replacement_distance is not None:
-            replacing_a = tuple(np.array(a) + replacement_distance * np.array(assignment_d))
-            assert level[a] == level[replacing_a]
-            replacing_start = tuple(np.array(replacing_a) + np.array(assignment_d))
-            replacing, r_deps = get_blocks_from(level, signs, replacing_start, assignment_d)
-            # Freeze for hashing
-            replacing = frozenset(replacing)
-            assert len(r_deps) == 0, "Context: Can only replace pure blocks: {} @ {}".format(name, loc)
-        else:
-            replacing = set([])
-        assignments[assign_to] = (assign_from, replacing)
-    #print("Preparse - Done with {}".format(name))
-    return name, define_text, assignments, dependencies
-
-def preparse_pattern(level, loc, signs):
-    define_component, define_text = prepare_preparse(level, loc, signs)
-    assert len(define_text) > 0, "Pattern: Bad name: @ {}".format(loc)
-    # Unlike contexts, Patterns can be named things like f(x)
-    # Find the first match
-    name_text = define_text[0]
-    try:
-        name = re.findall(identifier, name_text)[0]
-    except IndexError:
-        assert False, "Pattern: Bad name: {} @ {}".format(name, loc)
-    assert name not in pre_defines, "Pattern: Name is already defined: {} @ {}".format(name, loc)
-    # Dependencies from the define component
-    dependencies = get_dependencies(define_text, name)
-    # Also get dependencies from attached anonymous contexts
-    #TODO: Want to only get attachments OUTSIDE the definition so that
-    # purple wool can be used inside patterns
-    attach_points = set([n for n in neighbors(define_component) if level[n] == attach_block])
-    for a in attach_points:
-        context_seed = [n for n in neighbors(set([a])) if level[n] == define_block and n not in define_component]
-        assert len(context_seed) == 1, "Pattern: Multiple contexts from attachment: {} @ {}".format(name, loc)
-        context_component = component(context_seed[0], level)
-        context_start = [n for n in neighbors(context_component, [(0,1,0)]) if level[n] == context_block]
-        assert len(context_start) == 1, "Pattern: Invalid anonymous context: {} @ {}".format(name, loc)
-        assert level[tuple(np.array(context_start[0]) + np.array((0,1,0)))] == torch_up, \
-            "Pattern: Invalid anonymous context: {} @ {}".format(name, loc)
-        dependencies.add("anonymous_context_{}".format(context_start[0]))
-    # Get the blocks within the prepattern as well as preinterfaces
-    # The array of blocks within bounds
-    mins, shape = extent(define_component)
-    mins = np.array(mins)
-    predefinition = np.empty(shape, dtype="object")
-    indices = set()
-    for i, _ in np.ndenumerate(predefinition):
-        level_index = tuple(mins + np.array(i))
-        if level_index not in define_component:
-            put_block = level[level_index]
-        else:
-            put_block = air
-        predefinition[i] = put_block
-        indices.add(i)
-    interior_signs = set([s for s in signs if s.on in indices])
-    # Interfaces: Key - direction, Value - block array
-    return name, define_text, predefinition, interior_signs, dependencies
-
-def prepare_to_parse(level, loc, signs):
-    # Get the bedrock that defines the component
-    bot = tuple(np.array(loc) + np.array(facing_to_dir["down"]))
-    define_component = component(bot, level)
-    signs = get_signs_on(define_component, signs)
-    return define_component, signs
-
 def default_bf(block):
     return BlockFunction(set([(block, frozenset([block, air]))]))
-
-def default_pattern(block):
-    bf = default_bf(block)
-    a = np.empty((1,1,1), dtype=object)
-    a[(0,0,0)] = bf
-    return JustPattern(a, {})
-
-def lookup_block(block, contexts):
-    for c in contexts:
-        if block in c:
-            return c[block]
-    return default_pattern(block)
-
-def parse_context(preparse, contexts, patterns, fvars=None):
-    name, define_text, assignments = preparse
-    print(name)
-    print(assignments)
-    # Block -> Pattern
-    d = {}
-    # Assignment order is preserved
-    for k, v in assignments.items():
-        d[k] = eval(v, locals=(patterns | locals()))
-        if isinstance(k, str):
-            pass
-        #elif ...
-        #    pass
-
-def parse_pattern(preparse, contexts, patterns):
-    name, define_text, predefinition, interior_signs = preparse
 
 # 2.
 #   a) What are interfaces? What happens when we append two patterns with conflicting interfaces?
