@@ -1,14 +1,19 @@
+from functools import reduce
 
 class Assignment(object):
 
-    def __init__(self, ident, priority, require_str, preexpr):
+    def __init__(self, ident, priority, require_str, preexpr, pos):
         self.ident = ident
         self.preexpr = preexpr
         self.priority = priority
         self.require_str = require_str
+        self.pos = pos
 
     def __repr__(self):
-        return "{} := {} @ {} with {}".format(self.ident, self.preexpr, self.priority, self.require_str)
+        if self.require_str != "":
+            return "{}: {} := {} @ {} with {}".format(self.pos, self.ident, self.preexpr, self.priority, self.require_str)
+        else:
+            return "{}: {} := {} @ {}".format(self.pos, self.ident, self.preexpr, self.priority)
 
 # Expressions
 class Expr(object):
@@ -19,41 +24,52 @@ class Expr(object):
 
 class BlockFunctionDef(Expr):
 
-    def __init__(self, blocks_out, blocks_in):
+    def __init__(self, blocks_out, blocks_in, pos):
         self.blocks_out = blocks_out
         self.blocks_in = blocks_in
+        self.pos = pos
 
+    #TODO
     def compile(self, env):
         pass
 
     def __repr__(self):
-        return "BlockFunction({} -> {})".format(self.blocks_in.__repr__(), self.blocks_out.__repr__())
+        return "{}: BlockFunction({} -> {})".format(self.pos, self.blocks_in, self.blocks_out)
 
 class ExprGraph(Expr):
 
-    def __init__(self, block_tree):
+    def __init__(self, block_tree, pos):
         self.block_tree = block_tree
+        self.pos = pos
 
     def compile(self, env):
         pass
 
 class Namespace(Expr):
 
-    def __init__(self, assignments):
+    def __init__(self, assignments, pos):
         self.assignments = assignments
+        self.pos = pos
 
     def compile(self, env):
+        print("Compiling Namespace")
         # Compile assignments in order
         self.assignments.sort(key=lambda x: x.priority)
         self_dict = {}
         for assignment in self.assignments:
+            print(assignment)
             key = assignment.ident
             self_env = env | self_dict
-            use_env = eval(assignment.require_str, self_env)
+            if assignment.require_str != "":
+                use_envs = eval(assignment.require_str, self_env)
+                use_env = reduce(lambda x, y: x | y, use_envs, {})
+            else:
+                use_env = {}
             # Assignments are compiled with env | self dict
             val = assignment.preexpr.compile(self_env | use_env)
             # Add them to the self dict
             self_dict[key] = val
+            print(self_dict)
         # Return either self_dict, or self_dict["return"]
         if "return" in self_dict:
             return self_dict["return"]
@@ -61,34 +77,43 @@ class Namespace(Expr):
             return self_dict
 
     def __repr__(self):
-        return self.assignments.__repr__()
+        #return "{}: Namespace({})".format(self.pos, self.assignments)
+        return "{}: Namespace(...)".format(self.pos)
 
 class Lambda(Expr):
 
-    def __init__(self, var_list, expr):
+    def __init__(self, var_list, expr, pos):
         self.var_list = var_list
         self.expr = expr
+        self.pos = pos
 
     #TODO: should we do variable capture like this?
     # Where do we get the env from if not?
     def compile(self, env):
         return Closure(self.var_list, self.expr, env)
 
+    def __repr__(self):
+        #return "{}: Lambda({})".format(self.pos, self.expr)
+        return "{}: Lambda(...)".format(self.pos)
+
 class String(Expr):
 
-    def __init__(self, s):
+    def __init__(self, s, pos):
         self.s = s
+        self.pos = pos
 
     def compile(self, env):
+        print("Compiling String: {}".format(self))
         return eval(self.s, env)
 
     def __repr__(self):
-        return "String({})".format(self.s)
+        return "{}: String({})".format(self.pos, self.s)
 
 class BlockExpr(Expr):
 
-    def __init__(self, b):
+    def __init__(self, b, pos):
         self.b = b
+        self.pos = pos
 
     def compile(self, env):
         try:
@@ -97,27 +122,37 @@ class BlockExpr(Expr):
             return BlockFunction(set([(self.b, frozenset([self.b, air]))]))
 
     def __repr__(self):
-        return "BlockExpr({})".format(self.b)
+        return "{}: BlockExpr({})".format(self.pos, self.b)
 
 class UnionDef(Expr):
 
-    def __init__(self, exprs):
+    def __init__(self, exprs, pos):
         self.exprs = exprs
+        self.pos = pos
 
     def compile(self, env):
         out = map(lambda x: x.compile(env), self.exprs)
         return Union(out)
 
+    def __repr__(self):
+        #return "{}: Union({})".format(self.pos, self.exprs)
+        return "{}: Union(...)".format(self.pos)
+
 class FunCall(Expr):
 
-    def __init__(self, e_caller, e_args):
+    def __init__(self, e_caller, e_args, pos):
         self.e_caller = e_caller
         self.e_args = e_args
+        self.pos = pos
 
     def compile(self, env):
         v_args = map(lambda x: x.compile(env), self.e_args)
         v_caller = e_caller.compile(env)
         return v_caller(*v_args)
+
+    def __repr__(self):
+        return "{}: FunCall({}, ({}))".format(self.pos, self.e_caller, self.e_args)
+        return "{}: FunCall(...)".format(self.pos)
 
 class Graph(object):
 

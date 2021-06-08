@@ -58,37 +58,10 @@ def parse(level, signs):
     #all_locs = get_def_locations(level)
     #print("Locs: {}".format(all_locs))
     info = prepare_parse(level, signs)
-    print(info.assignment_signs)
-    global_expr = parse_namespace(info, "global", None)
-    #global_val = global_expr.compile({})
+    #print(info.assignment_signs)
+    global_expr, _ = parse_namespace(info, "global", None)
+    global_val = global_expr.compile({})
     return level
-
-def all_preparse(all_locs, level, signs):
-    # Key: name, value: {name} is a dependency DAG of patterns
-    #TODO: how to verify acyclic?
-    all_dependencies = {}
-    # Key: name, value: preparse components
-    # Everything that is required to actually build the required structure
-    context_preparse = {}
-    pattern_preparse = {}
-    for loc_type, loc in all_locs:
-        if loc_type == "Context":
-            name, define_text, assignments, dependencies = preparse_context(level, loc, signs)
-            print("Context Name: {}".format(name))
-            print("Location: {}".format(loc))
-            print("Dependencies: {}".format(dependencies))
-            all_dependencies[name] = dependencies
-            context_preparse[name] = (name, define_text, assignments)
-        elif loc_type == "Pattern":
-            name, define_text, predefinition, interior_signs, dependencies = preparse_pattern(level, loc, signs)
-            print("Pattern Name: {}".format(name))
-            print("Location: {}".format(loc))
-            print("Dependencies: {}".format(dependencies))
-            all_dependencies[name] = dependencies
-            pattern_preparse[name] = (name, define_text, predefinition, interior_signs)
-        elif loc_type == "Funcall":
-            pass
-    return all_dependencies, context_preparse, pattern_preparse
 
 nbt_texts = ["Text1", "Text2", "Text3", "Text4"]
 
@@ -345,7 +318,7 @@ def match_ids_with_vals(id_posns, val_posns):
     for id_pos in id_posns:
         # Sort by distance, closest one is the desired one
         val_posns.sort(key=lambda x: np.linalg.norm(np.array(id_pos) - np.array(x)))
-        print(val_posns)
+        #print(val_posns)
         matched.append((id_pos, val_posns[0]))
     return matched
 
@@ -362,7 +335,7 @@ def get_ident(pos, info):
 
 # Get the preparsed level AST
 def parse_assignment(info, pos, direction):
-    print("Parsing Assignment at {}".format(pos))
+    #print("Parsing Assignment at {}".format(pos))
     # Direction is unknown, so should be 
     assert direction is None, "Bad assignment: {}".format(pos)
     s = info.assignment_signs[pos]
@@ -384,24 +357,24 @@ def parse_assignment(info, pos, direction):
     #print("Val:", val_posns)
     matched_posns = match_ids_with_vals(ident_posns, val_posns)
     assert len(matched_posns) > 0, "Bad assignment: {}".format(pos)
-    print(matched_posns)
+    #print(matched_posns)
     # Identifier -> pos
     pre_mapping = [(get_ident(k, info), v) for k,v in matched_posns]
     # Identifier -> parsed thing
     mapping = {}
     for ident, v_pos in pre_mapping:
-        val = parse_any(info, v_pos, assign_direction)
+        val, finished = parse_any(info, v_pos, assign_direction)
         mapping[ident] = val
     # Do the extra work to get the priority and the require_str
     assign_signs = get_signs_on(assign_component, info.signs)
-    print(assign_signs)
+    #print(assign_signs)
     # Remove all the signs which are keys
     for k, v in matched_posns:
         ss = get_sign_at(k, info.signs)
         if len(ss) == 1:
-            print(k)
+            #print(k)
             assign_signs.remove(ss[0])
-    print(assign_signs)
+    #print(assign_signs)
     # Sort them by decreasing y-coordinate
     assign_signs.sort(key=lambda x: -x.on[1])
     assert assign_signs[0] == s, "Bad assignment: {}".format(pos)
@@ -410,7 +383,7 @@ def parse_assignment(info, pos, direction):
     rest_text = s.text[2:] + reduce(lambda x,y: x + y, [s.text for s in assign_signs[1:]], [])
     # String
     require_str = reduce(lambda x,y: x + y, rest_text, "")
-    assignments = [Assignment(ident, priority, require_str, val) for ident, val in mapping.items()]
+    assignments = [Assignment(ident, priority, require_str, val, pos) for ident, val in mapping.items()]
     return assignments
 
 def parse_expr_graph(info, pos, directions=adjacents, finished=None):
@@ -465,14 +438,14 @@ def expr_graph_to_list(graph, root):
     return list(map(lambda x: graph.nodes[x], out_pos))
 
 def parse_namespace(info, pos, direction):
-    print("Parsing Namespace at {}".format(pos))
+    #print("Parsing Namespace at {}".format(pos))
     assignments = []
     for a in info.namespaces_as[pos]:
         assignments.extend(parse_assignment(info, a, None))
-    return Namespace(assignments)
+    return Namespace(assignments, pos), set([pos])
 
 def parse_blockfunction(info, pos, direction):
-    print("Parsing BlockFunction at {}".format(pos))
+    #print("Parsing BlockFunction at {}".format(pos))
     output_start = tuple(np.array(pos) + np.array(direction))
     finished = set([output_start])
     _, component1, g1 = parse_expr_graph(info, output_start, [direction], finished)
@@ -489,17 +462,16 @@ def parse_blockfunction(info, pos, direction):
         component2 = set()
     exprs_out = expr_graph_to_list(g1, output_start)
     finished = component1 | component2 | set([pos, boundary])
-    return BlockFunctionDef(exprs_out, exprs_in), finished
-
+    return BlockFunctionDef(exprs_out, exprs_in, pos), finished
 
 def parse_pattern(info, pos, direction):
-    print("Parsing Pattern at {}".format(pos))
+    #print("Parsing Pattern at {}".format(pos))
     start = tuple(np.array(pos) + np.array(direction))
     o, f, g = parse_expr_graph(info, start, finished=set([pos]))
-    return ExprGraph(g), f
+    return ExprGraph(g, pos), f
 
 def parse_lambda(info, pos, direction):
-    print("Parsing Lambda at {}".format(pos))
+    #print("Parsing Lambda at {}".format(pos))
     inputs_start = tuple(np.array(pos) + np.array(direction))
     inputs_component = component(inputs_start, info.level, directions=[direction])
     ident_posns = neighbors(inputs_component)
@@ -510,19 +482,19 @@ def parse_lambda(info, pos, direction):
     expr_pos = neighbors(inputs_component, directions=[direction])
     assert len(expr_pos) == 1, "Bad lambda: {}".format(pos)
     expr_pos = next(iter(expr_pos))
-    expr = parse_any(info, expr_pos, direction)
-    return Lambda(idents, expr)
+    expr, finished = parse_any(info, expr_pos, direction)
+    return Lambda(idents, expr, pos), inputs_component | finished
 
 def parse_string(info, pos, direction):
-    print("Parsing String at {}".format(pos))
+    #print("Parsing String at {}".format(pos))
     signs_on = [s for s in info.signs if s.on == pos]
     assert len(signs_on) == 1
     sign = signs_on[0]
     t = sign.full_text
-    return String(t), set([pos, sign.pos])
+    return String(t, pos), set([pos, sign.pos])
 
 def parse_funcall(info, pos, direction):
-    print("Parsing FunCall at {}".format(pos))
+    #print("Parsing FunCall at {}".format(pos))
     fn_start = tuple(np.array(pos) + np.array(direction))
     finished = set([fn_start])
     _, component1, g1 = parse_expr_graph(info, fn_start, [direction], finished)
@@ -540,19 +512,19 @@ def parse_funcall(info, pos, direction):
     else:
         component2 = set()
     finished = component1 | component2 | set([pos, boundary])
-    return FunCall(fn, args), finished
+    return FunCall(fn, args, pos), finished
 
 def parse_union(info, pos, direction):
-    print("Parsing Union at {}".format(pos))
+    #print("Parsing Union at {}".format(pos))
     start = tuple(np.array(pos) + np.array(direction))
     finished = set([start])
     _, component, g = parse_expr_graph(info, start, [direction], finished)
     exprs = expr_graph_to_list(g, start)
-    return UnionDef(exprs), component | set([pos])
+    return UnionDef(exprs, pos), component | set([pos])
 
 def parse_block(info, pos, direction):
-    print("Parsing Block at {}".format(pos))
-    return BlockExpr(info.level[pos]), set([pos])
+    #print("Parsing Block at {}".format(pos))
+    return BlockExpr(info.level[pos], pos), set([pos])
 
 parsers = {
     blockfunction_block: parse_blockfunction,
@@ -618,7 +590,8 @@ def parse_any(info, pos, direction):
     block_type = info.level[pos]
     assert block_type in parsers, "No parser for the block type at: {}".format(pos)
     parser = parsers[block_type]
-    val = parser(info, pos, direction)
+    expr, finished = parser(info, pos, direction)
+    return expr, finished
 
 class Context(object):
 
